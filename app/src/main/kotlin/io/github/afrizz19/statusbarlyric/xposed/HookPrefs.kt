@@ -5,17 +5,10 @@ import io.github.afrizz19.statusbarlyric.prefs.LyricPrefs
 import de.robv.android.xposed.XSharedPreferences
 import de.robv.android.xposed.XposedBridge
 
-/**
- * Reads the config app's settings from inside SystemUI.
- *
- * The file is only re-read when it has actually changed, and at most every
- * [RELOAD_MS], so this is cheap enough to poll from the render tick — which is what
- * makes colour changes apply live, without restarting SystemUI.
- */
 object HookPrefs {
 
     private const val TAG = "StatusBarLyric16"
-    private const val RELOAD_MS = 1000L
+    private const val RELOAD_MS = 400L
 
     private var prefs: XSharedPreferences? = null
     private var lastReload = 0L
@@ -46,7 +39,26 @@ object HookPrefs {
         return existing
     }
 
-    /** Everything that affects painting, or defaults if the file isn't readable yet. */
+    fun targetPackages(nowMs: Long): Set<String> {
+        val p = current(nowMs) ?: return LyricPrefs.DEFAULT_PACKAGES
+        if (!p.getBoolean(LyricPrefs.KEY_TARGET_CUSTOMIZED, false)) {
+            return LyricPrefs.DEFAULT_PACKAGES
+        }
+        val raw = p.getString(LyricPrefs.KEY_TARGET_PACKAGES, "").orEmpty()
+        return raw.split(',')
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
+            .toSet()
+    }
+
+    /** Returns fresh Live Caption text if updated within the last 5 seconds, else null. */
+    fun recentLiveCaption(nowRealtimeMs: Long, uptimeMs: Long): String? {
+        val p = current(uptimeMs) ?: return null
+        val ts = p.getLong(LyricPrefs.KEY_LIVE_CAPTION_TS, 0L)
+        if (ts <= 0L || nowRealtimeMs - ts > 5000L) return null
+        return p.getString(LyricPrefs.KEY_LIVE_CAPTION_TEXT, null)?.takeIf { it.isNotBlank() }
+    }
+
     fun style(nowMs: Long): LyricPrefs.Style {
         val prefs = current(nowMs) ?: return LyricPrefs.Style.DEFAULT
         return LyricPrefs.Style(

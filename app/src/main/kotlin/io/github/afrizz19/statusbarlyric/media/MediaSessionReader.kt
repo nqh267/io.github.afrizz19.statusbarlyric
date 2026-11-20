@@ -8,14 +8,8 @@ import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.SystemClock
 import android.util.Log
+import io.github.afrizz19.statusbarlyric.xposed.HookPrefs
 
-/**
- * Reads the currently playing track from active media sessions.
- *
- * Inside the SystemUI process (where the Xposed hook runs) SystemUI already holds
- * MEDIA_CONTENT_CONTROL, so [notificationListener] can be left null and
- * `getActiveSessions(null)` just works — no NotificationListenerService required.
- */
 class MediaSessionReader(
     context: Context,
     private val notificationListener: ComponentName? = null,
@@ -24,10 +18,6 @@ class MediaSessionReader(
     private val sessionManager: MediaSessionManager? =
         context.getSystemService(Context.MEDIA_SESSION_SERVICE) as? MediaSessionManager
 
-    /**
-     * @return the most relevant supported track (prefers a playing session), or null
-     *         if no supported session is active or permission is missing.
-     */
     fun readActiveTrack(): TrackInfo? {
         val manager = sessionManager ?: return null
         val controllers = try {
@@ -37,10 +27,12 @@ class MediaSessionReader(
             return null
         }
 
-        val supported = controllers.filter { it.packageName in TrackInfo.SUPPORTED_PACKAGES }
+        val whitelist = HookPrefs.targetPackages(SystemClock.uptimeMillis())
+        if (whitelist.isEmpty()) return null
+
+        val supported = controllers.filter { it.packageName in whitelist }
         if (supported.isEmpty()) return null
 
-        // Prefer a controller that is actively playing; else the first supported one.
         val chosen = supported.firstOrNull { it.isPlaying() } ?: supported.first()
         return chosen.toTrackInfo()
     }
@@ -61,7 +53,7 @@ class MediaSessionReader(
         if (title.isBlank()) return null
 
         val isPlaying = state?.state == PlaybackState.STATE_PLAYING
-        val trackKey = "$packageName|${artist.trim()}|${title.trim()}"
+        val trackKey = "$packageName|${artist.trim()}\vert{}${title.trim()}"
         val anchor = anchorFor(
             trackKey = trackKey,
             reported = (state?.position ?: 0L).coerceAtLeast(0),
@@ -85,18 +77,6 @@ class MediaSessionReader(
 
     private class Anchor(val positionMs: Long, val sampledAt: Long)
 
-    /**
-     * Chooses the (position, sample time) pair to extrapolate from.
-     *
-     * YouTube Music (and ReVanced) keep republishing `position=0` mid-song while moving
-     * `lastPositionUpdateTime` up to now. Taken at face value that repeatedly drags the
-     * estimate back to the start of the track, which is what makes lines show up late or
-     * jump backwards.
-     *
-     * The tell is specific: a position at (or next to) zero while we are already well
-     * into the song. Only that shape is rejected — a real backwards seek reports the
-     * position it actually landed on, so it is still honoured.
-     */
     private fun anchorFor(
         trackKey: String,
         reported: Long,
@@ -118,8 +98,6 @@ class MediaSessionReader(
             anchorPosition
         }
 
-        // "Rewound to the very start" while playback never stopped and we were minutes in:
-        // that isn't a seek, it's a stale republish.
         val bogus = isPlaying &&
             reported <= NEAR_ZERO_MS &&
             expected > BOGUS_REWIND_MS
@@ -137,11 +115,7 @@ class MediaSessionReader(
 
     companion object {
         private const val TAG = "MediaSessionReader"
-
-        /** A reported position this close to zero counts as "the very start". */
         private const val NEAR_ZERO_MS = 1500L
-
-        /** How far into the track we must be before a jump to zero is treated as stale. */
         private const val BOGUS_REWIND_MS = 5000L
     }
 }

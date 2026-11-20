@@ -1,6 +1,12 @@
 package io.github.afrizz19.statusbarlyric.ui
 
+import android.content.ComponentName
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Bundle
+import android.provider.Settings
+import android.text.TextUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -11,30 +17,39 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.systemBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -54,17 +69,20 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import io.github.afrizz19.statusbarlyric.BuildConfig
 import io.github.afrizz19.statusbarlyric.api.LrcMuxApiClient
 import io.github.afrizz19.statusbarlyric.prefs.LyricPrefs
+import io.github.afrizz19.statusbarlyric.service.LiveCaptionAccessibilityService
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
-/**
- * Status / setup screen and the module's settings. The hook picks changes up from the
- * shared preference file within a second — no reboot, no SystemUI restart.
- */
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -79,22 +97,43 @@ class MainActivity : ComponentActivity() {
     }
 }
 
+private data class AppEntry(
+    val label: String,
+    val packageName: String,
+)
+
 @Composable
 private fun SetupScreen() {
     val context = LocalContext.current
     val prefs = remember { LyricPrefs.of(context) }
     var style by remember { mutableStateOf(LyricPrefs.style(prefs)) }
+    var targetPackages by remember { mutableStateOf(LyricPrefs.targetPackages(prefs)) }
+    var showAppPicker by remember { mutableStateOf(false) }
 
     fun update(next: LyricPrefs.Style) {
         style = next
         LyricPrefs.save(prefs, next)
     }
 
+    fun updateTargets(next: Set<String>) {
+        targetPackages = next
+        LyricPrefs.setTargetPackages(prefs, next)
+    }
+
+    if (showAppPicker) {
+        TargetAppsDialog(
+            selected = targetPackages,
+            onDismiss = { showAppPicker = false },
+            onSave = {
+                updateTargets(it)
+                showAppPicker = false
+            },
+        )
+    }
+
     Column(
         modifier = Modifier
             .fillMaxSize()
-            // Before the scroll, so the viewport itself is inset: the status bar and
-            // gesture bar never overlap the content, scrolled or not.
             .windowInsetsPadding(WindowInsets.systemBars)
             .verticalScroll(rememberScrollState())
             .padding(20.dp),
@@ -107,6 +146,13 @@ private fun SetupScreen() {
         SectionLabel("Preview")
         StylePreview(style)
 
+        SectionLabel("Apps & Fallback")
+        TargetAppsCard(
+            selectedPackages = targetPackages,
+            onOpenPicker = { showAppPicker = true },
+        )
+        LiveCaptionCard()
+
         SectionLabel("Settings")
         SyncSetting(style) { update(it) }
         ModeSetting(style) { update(it) }
@@ -118,42 +164,269 @@ private fun SetupScreen() {
         Step(
             1,
             "Enable in LSPosed",
-            "Open LSPosed → Modules → enable \"Status Bar Lyric\", and tick " +
-                "System UI in its scope.",
+            "Open LSPosed → Modules → enable "Status Bar Lyric", and tick System UI in its scope.",
         )
         Step(
             2,
             "Reboot (or restart SystemUI)",
-            "The hook is installed when SystemUI starts.",
+            "The hook is installed next to the status bar clock without interfering with Dynamic Island.",
         )
         Step(
             3,
-            "Play a song",
-            "YouTube Music (incl. ReVanced) or Spotify. The lyric replaces the " +
-                "clock while a line is showing, and the clock returns when playback stops.",
+            "Play music or video",
+            "Any whitelisted app (Spotify, YouTube, TikTok, etc.). Falls back to LRCLIB and Live Caption when needed.",
         )
 
         Card(modifier = Modifier.padding(top = 4.dp)) {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text("Lyrics API", style = MaterialTheme.typography.titleSmall)
+                Text("Lyrics Sources", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "All lyrics come from lrcmux, a public third-party service — " +
-                        "${LrcMuxApiClient.DEFAULT_BASE_URL}/get?artist=…&title=…",
+                    "1. Lrcmux (${LrcMuxApiClient.DEFAULT_BASE_URL})
+" +
+                        "2. LRCLIB (https://lrclib.net/api/get)
+" +
+                        "3. Android Live Caption (com.google.android.as after 2.5s)",
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
         }
-
-        Text(
-            "No notification access or companion service is needed — SystemUI can " +
-                "already read media sessions.",
-            style = MaterialTheme.typography.bodySmall,
-        )
         Footer()
     }
 }
 
-/** Sample lyric on a status-bar-like strip, drawn with the current settings. */
+@Composable
+private fun TargetAppsCard(
+    selectedPackages: Set<String>,
+    onOpenPicker: () -> Unit,
+) {
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Target Apps (Whitelist)", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        "${selectedPackages.size} app(s) allowed to display lyrics",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Button(onClick = onOpenPicker) {
+                    Text("Select Apps")
+                }
+            }
+            if (selectedPackages.isNotEmpty()) {
+                Text(
+                    selectedPackages.sorted().joinToString(", "),
+                    style = MaterialTheme.typography.bodySmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    color = MaterialTheme.colorScheme.secondary,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TargetAppsDialog(
+    selected: Set<String>,
+    onDismiss: () -> Unit,
+    onSave: (Set<String>) -> Unit,
+) {
+    val context = LocalContext.current
+    var query by remember { mutableStateOf("") }
+    var draft by remember { mutableStateOf(selected) }
+    var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
+    var loading by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        apps = withContext(Dispatchers.IO) {
+            val pm = context.packageManager
+            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+            val resolved = pm.queryIntentActivities(intent, PackageManager.MATCH_ALL)
+            val map = linkedMapOf<String, AppEntry>()
+            for (ri in resolved) {
+                val pkg = ri.activityInfo?.packageName ?: continue
+                if (pkg == context.packageName) continue
+                if (!map.containsKey(pkg)) {
+                    val label = runCatching { ri.loadLabel(pm).toString() }.getOrDefault(pkg)
+                    map[pkg] = AppEntry(label = label, packageName = pkg)
+                }
+            }
+            for (pkg in selected) {
+                if (!map.containsKey(pkg)) {
+                    val label = runCatching {
+                        val ai = pm.getApplicationInfo(pkg, 0)
+                        pm.getApplicationLabel(ai).toString()
+                    }.getOrDefault(pkg)
+                    map[pkg] = AppEntry(label = label, packageName = pkg)
+                }
+            }
+            map.values.sortedWith(
+                compareByDescending<AppEntry> { it.packageName in selected }
+                    .thenBy { it.label.lowercase() }
+            )
+        }
+        loading = false
+    }
+
+    val filtered = remember(apps, query) {
+        val q = query.trim().lowercase()
+        if (q.isEmpty()) apps
+        else apps.filter { it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q) }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Target Apps (${draft.size})") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = query,
+                    onValueChange = { query = it },
+                    placeholder = { Text("Search app name or package...") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    TextButton(onClick = { draft = LyricPrefs.DEFAULT_PACKAGES }) {
+                        Text("Reset defaults")
+                    }
+                    TextButton(onClick = { draft = emptySet() }) {
+                        Text("Clear all")
+                    }
+                }
+                if (loading) {
+                    Text("Loading installed apps...", style = MaterialTheme.typography.bodySmall)
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 320.dp),
+                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                    ) {
+                        items(filtered, key = { it.packageName }) { app ->
+                            val checked = app.packageName in draft
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        draft = if (checked) draft - app.packageName else draft + app.packageName
+                                    }
+                                    .padding(vertical = 4.dp),
+                                verticalAlignment = Alignment.CenterVertically,
+                            ) {
+                                Checkbox(
+                                    checked = checked,
+                                    onCheckedChange = { isChecked ->
+                                        draft = if (isChecked) draft + app.packageName else draft - app.packageName
+                                    },
+                                )
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        app.label,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                    Text(
+                                        app.packageName,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(onClick = { onSave(draft) }) {
+                Text("Save")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancel")
+            }
+        },
+    )
+}
+
+@Composable
+private fun LiveCaptionCard() {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var enabled by remember { mutableStateOf(isAccessibilityEnabled(context)) }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                enabled = isAccessibilityEnabled(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    Card {
+        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Live Caption Fallback", style = MaterialTheme.typography.titleSmall)
+                    Text(
+                        if (enabled) "Accessibility Service: Active"
+                        else "Accessibility Service: Disabled",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (enabled) MaterialTheme.colorScheme.secondary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                OutlinedButton(
+                    onClick = {
+                        context.startActivity(
+                            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        )
+                    },
+                ) {
+                    Text(if (enabled) "Settings" else "Enable")
+                }
+            }
+            Text(
+                "Reads Android Live Caption (com.google.android.as) when a whitelisted app has no synced lyrics after 2.5s.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
+}
+
+private fun isAccessibilityEnabled(context: Context): Boolean {
+    val expected = ComponentName(context, LiveCaptionAccessibilityService::class.java)
+    val enabledServices = Settings.Secure.getString(
+        context.contentResolver,
+        Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
+    ) ?: return false
+    val splitter = TextUtils.SimpleStringSplitter(':')
+    splitter.setString(enabledServices)
+    while (splitter.hasNext()) {
+        val cn = ComponentName.unflattenFromString(splitter.next())
+        if (cn == expected) return true
+    }
+    return false
+}
+
 @Composable
 private fun StylePreview(style: LyricPrefs.Style) {
     val following = style.textColor == LyricPrefs.FOLLOW_CLOCK
@@ -177,7 +450,6 @@ private fun StylePreview(style: LyricPrefs.Style) {
             .padding(horizontal = 12.dp, vertical = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        // Stroke behind, fill on top — the same two passes the status bar view does.
         if (style.outlineOn && style.outlineWidthDp > 0f) {
             Text(
                 PREVIEW_TEXT,
@@ -186,7 +458,6 @@ private fun StylePreview(style: LyricPrefs.Style) {
             )
         }
         if (wordMode) {
-            // Frozen mid-sweep, so the two colours are both visible at a glance.
             Text(
                 buildAnnotatedString {
                     val at = (PREVIEW_TEXT.length * PREVIEW_SUNG_FRACTION).toInt()
@@ -209,10 +480,6 @@ private fun StylePreview(style: LyricPrefs.Style) {
     }
 }
 
-/**
- * Word-level (karaoke) animation toggle. All lyrics come from lrcmux;
- * it provides word timings when available, otherwise line-level timing.
- */
 @Composable
 private fun ModeSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) -> Unit) {
     val wordMode = style.mode == LyricPrefs.MODE_WORD
@@ -223,8 +490,7 @@ private fun ModeSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) ->
                 onChange(style.copy(mode = if (it) LyricPrefs.MODE_WORD else LyricPrefs.MODE_LINE))
             }
             Text(
-                "Each word lights up as it's sung. Lrcmux provides word timings when " +
-                    "available; tracks with only line timing show as a plain line.",
+                "Each word lights up as it's sung when Lrcmux provides word timings; LRCLIB and line tracks show as plain lines.",
                 style = MaterialTheme.typography.bodySmall,
             )
 
@@ -253,20 +519,11 @@ private fun ModeSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) ->
                 ToggleHeader("Smooth sweep", style.wordSmooth) {
                     onChange(style.copy(wordSmooth = it))
                 }
-                Text(
-                    "Animates between updates instead of stepping 10× a second. " +
-                        "Smoother, but redraws the status bar every frame while a word is sung.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
             }
         }
     }
 }
 
-/**
- * Manual timing nudge. Music apps publish their playback position lazily and Bluetooth
- * adds its own delay, so the offset lets the user pull the lyric forward to match.
- */
 @Composable
 private fun SyncSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) -> Unit) {
     Card {
@@ -298,11 +555,6 @@ private fun SyncSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) ->
                 valueRange = LyricPrefs.SYNC_OFFSET_MIN.toFloat()..LyricPrefs.SYNC_OFFSET_MAX.toFloat(),
                 steps = 59,
             )
-            Text(
-                "Drag right if the lyric arrives late. Bluetooth headphones usually need " +
-                    "+150 to +300 ms.",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }
@@ -312,7 +564,6 @@ private fun ColorSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) -
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Lyric colour", style = MaterialTheme.typography.titleSmall)
-
             TextButton(
                 onClick = { onChange(style.copy(textColor = LyricPrefs.FOLLOW_CLOCK)) },
                 enabled = style.textColor != LyricPrefs.FOLLOW_CLOCK,
@@ -322,15 +573,9 @@ private fun ColorSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) -
                     else "Follow the clock colour"
                 )
             }
-
             ColorPicker(style.textColor, sentinel = LyricPrefs.FOLLOW_CLOCK) {
                 onChange(style.copy(textColor = it))
             }
-
-            Text(
-                "Applies within a second — no restart needed.",
-                style = MaterialTheme.typography.bodySmall,
-            )
         }
     }
 }
@@ -340,7 +585,6 @@ private fun ShadowSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) 
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             ToggleHeader("Shadow", style.shadowOn) { onChange(style.copy(shadowOn = it)) }
-
             if (style.shadowOn) {
                 ColorPicker(style.shadowColor, alphaAware = true) {
                     onChange(style.copy(shadowColor = it))
@@ -364,16 +608,11 @@ private fun OutlineSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style)
     Card {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
             ToggleHeader("Outline", style.outlineOn) { onChange(style.copy(outlineOn = it)) }
-
             if (style.outlineOn) {
                 ColorPicker(style.outlineColor) { onChange(style.copy(outlineColor = it)) }
                 DpSlider("Thickness", style.outlineWidthDp, 0.25f, 3f, 10) {
                     onChange(style.copy(outlineWidthDp = it))
                 }
-                Text(
-                    "A thick outline on small text can close up the letters.",
-                    style = MaterialTheme.typography.bodySmall,
-                )
             }
         }
     }
@@ -407,10 +646,7 @@ private fun DpSlider(
             String.format("%.2f", value).trimEnd('0').trimEnd('.')
         }
         val unit = if (label.startsWith("Dim")) "" else " dp"
-        Text(
-            "$label: $formatted$unit",
-            style = MaterialTheme.typography.bodySmall,
-        )
+        Text("$label: $formatted$unit", style = MaterialTheme.typography.bodySmall)
         Slider(
             value = value.coerceIn(from, to),
             onValueChange = onChange,
@@ -431,18 +667,6 @@ private fun Swatches(selected: Int, onPick: (Int) -> Unit) {
     }
 }
 
-/**
- * Presets plus a free-form hex field, for any setting that is just a colour.
- *
- * The field is keyed on [selected] so picking a swatch refreshes the text, but typing
- * only pushes a change once the input actually parses — a half-typed `#FF` shouldn't
- * repaint the status bar. [alphaAware] keeps the `#AARRGGBB` hint on the shadow, where
- * a translucent colour is a normal thing to want.
- *
- * [sentinel] is the "not an explicit colour" value for settings that have one
- * ([LyricPrefs.FOLLOW_CLOCK], [LyricPrefs.DERIVE_DIM]). Both are 0, which is a real
- * ARGB value, so the field must blank instead of claiming `#00000000`.
- */
 @Composable
 private fun ColorPicker(
     selected: Int,
@@ -519,7 +743,6 @@ private fun Step(number: Int, title: String, body: String) {
     }
 }
 
-/** Where the credit and the GitHub profile link point. */
 private const val AUTHOR_NAME = "Afrizz19"
 private const val AUTHOR_URL = "https://github.com/afrizz19"
 private const val REPO_URL = "https://github.com/afrizz19/io.github.afrizz19.statusbarlyric"
@@ -539,7 +762,6 @@ private val AppColors = darkColorScheme(
     outlineVariant = Color(0xFF3A3842),
 )
 
-/** Gradient hero: app name, one-line summary, version and the author's GitHub link. */
 @Composable
 private fun Header() {
     val uriHandler = LocalUriHandler.current
@@ -560,8 +782,7 @@ private fun Header() {
                 color = Color.White,
             )
             Text(
-                "Synced lyrics in your status bar. An LSPosed module that runs " +
-                    "entirely inside SystemUI.",
+                "Synced lyrics in your status bar. Runs inside SystemUI without touching Dynamic Island.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.White.copy(alpha = 0.85f),
             )
@@ -592,7 +813,6 @@ private fun Pill(text: String, onClick: (() -> Unit)? = null) {
     )
 }
 
-/** Shown when LSPosed isn't active for this app, so settings can't reach SystemUI. */
 @Composable
 private fun InactiveWarning() {
     Card(
@@ -604,10 +824,7 @@ private fun InactiveWarning() {
         Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text("Module not active", style = MaterialTheme.typography.titleSmall)
             Text(
-                "LSPosed isn't sharing this app's settings with System UI, so changes here " +
-                    "won't affect the status bar. Enable this module in LSPosed (scope: " +
-                    "System UI), reboot, then reopen the app. If an older copy of the module " +
-                    "is installed, disable and uninstall it.",
+                "LSPosed isn't sharing this app's settings with System UI. Enable this module in LSPosed (scope: System UI), reboot, then reopen the app.",
                 style = MaterialTheme.typography.bodySmall,
             )
         }
@@ -626,7 +843,6 @@ private fun SectionLabel(text: String) {
     )
 }
 
-/** Credit line with a link to the author's GitHub profile and the project repo. */
 @Composable
 private fun Footer() {
     val uriHandler = LocalUriHandler.current
@@ -660,6 +876,4 @@ private fun Footer() {
 }
 
 private const val PREVIEW_TEXT = "It's a cruel summer"
-
-/** Where the preview freezes the karaoke sweep, so both colours are visible. */
 private const val PREVIEW_SUNG_FRACTION = 0.55f
