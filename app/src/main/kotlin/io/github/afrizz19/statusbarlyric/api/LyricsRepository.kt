@@ -47,11 +47,11 @@ class LyricsRepository(
     private fun normalizeMetadata(rawArtist: String, rawTitle: String): Pair<String, String> {
         var title = rawTitle
             // Cut trailing channel/hashtag suffixes after | or //
-            .replace(Regex("""\s*(\||//)\s*.*$"""), "")
+            .replace(Regex("""\s*(||//)\s*.*$"""), "")
             // Remove bracketed / parenthesized tags like (Official MV), [Lyrics], (Remix), etc.
             .replace(
                 Regex(
-                    """[\(\[\{【「].*?(official\vert{}music\s*video\vert{}mv\vert{}lyric\vert{}lyrics\vert{}audio\vert{}video\vert{}hd\vert{}4k\vert{}8k\vert{}hq\vert{}visualizer\vert{}live\vert{}cover\vert{}remix\vert{}speed\s*up\vert{}slowed\vert{}reverb\vert{}ver\.?\vert{}version\vert{}full\vert{}teaser\vert{}trailer\vert{}shorts\vert{}tiktok\vert{}prod\.\vert{}ft\.\vert{}feat\.).*?[\)\]\}】」]""",
+                    """[\(\[\{【「].*?(official|music\s*video|mv|lyric|lyrics|audio|video|hd|4k|8k|hq|visualizer|live|cover|remix|speed\s*up|slowed|reverb|ver\.?|version|full|teaser|trailer|shorts|tiktok|prod\.|ft\.|feat\.).*?[\)\]\}】」]""",
                     RegexOption.IGNORE_CASE,
                 ),
                 "",

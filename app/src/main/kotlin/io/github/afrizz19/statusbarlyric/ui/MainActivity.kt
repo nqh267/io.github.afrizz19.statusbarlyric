@@ -164,7 +164,7 @@ private fun SetupScreen() {
         Step(
             1,
             "Enable in LSPosed",
-            "Open LSPosed → Modules → enable "Status Bar Lyric", and tick System UI in its scope.",
+            "Open LSPosed → Modules → enable 'Status Bar Lyric', and tick System UI in its scope.",
         )
         Step(
             2,
@@ -181,10 +181,8 @@ private fun SetupScreen() {
             Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text("Lyrics Sources", style = MaterialTheme.typography.titleSmall)
                 Text(
-                    "1. Lrcmux (${LrcMuxApiClient.DEFAULT_BASE_URL})
-" +
-                        "2. LRCLIB (https://lrclib.net/api/get)
-" +
+                    "1. Lrcmux (${LrcMuxApiClient.DEFAULT_BASE_URL})\n" +
+                        "2. LRCLIB (https://lrclib.net/api/get)\n" +
                         "3. Android Live Caption (com.google.android.as after 2.5s)",
                     style = MaterialTheme.typography.bodySmall,
                 )

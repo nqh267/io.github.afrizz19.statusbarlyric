@@ -53,7 +53,7 @@ class MediaSessionReader(
         if (title.isBlank()) return null
 
         val isPlaying = state?.state == PlaybackState.STATE_PLAYING
-        val trackKey = "$packageName|${artist.trim()}\vert{}${title.trim()}"
+        val trackKey = "$packageName|${artist.trim()}|${title.trim()}"
         val anchor = anchorFor(
             trackKey = trackKey,
             reported = (state?.position ?: 0L).coerceAtLeast(0),
