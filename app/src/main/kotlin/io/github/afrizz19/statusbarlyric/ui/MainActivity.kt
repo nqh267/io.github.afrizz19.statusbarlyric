@@ -4,25 +4,30 @@ import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
 import android.os.Bundle
 import android.provider.Settings
 import android.text.TextUtils
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
@@ -34,10 +39,9 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
-import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -56,10 +60,13 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
@@ -73,6 +80,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -100,7 +109,20 @@ class MainActivity : ComponentActivity() {
 private data class AppEntry(
     val label: String,
     val packageName: String,
+    val icon: ImageBitmap?,
 )
+
+private fun drawableToImageBitmap(drawable: Drawable?): ImageBitmap? = runCatching {
+    if (drawable == null) return@runCatching null
+    if (drawable is BitmapDrawable && drawable.bitmap != null) {
+        return@runCatching Bitmap.createScaledBitmap(drawable.bitmap, 96, 96, true).asImageBitmap()
+    }
+    val bmp = Bitmap.createBitmap(96, 96, Bitmap.Config.ARGB_8888)
+    val canvas = Canvas(bmp)
+    drawable.setBounds(0, 0, canvas.width, canvas.height)
+    drawable.draw(canvas)
+    bmp.asImageBitmap()
+}.getOrNull()
 
 @Composable
 private fun SetupScreen() {
@@ -108,6 +130,7 @@ private fun SetupScreen() {
     val prefs = remember { LyricPrefs.of(context) }
     var style by remember { mutableStateOf(LyricPrefs.style(prefs)) }
     var targetPackages by remember { mutableStateOf(LyricPrefs.targetPackages(prefs)) }
+    var appOffsets by remember { mutableStateOf(LyricPrefs.appOffsets(prefs)) }
     var showAppPicker by remember { mutableStateOf(false) }
 
     fun update(next: LyricPrefs.Style) {
@@ -115,17 +138,20 @@ private fun SetupScreen() {
         LyricPrefs.save(prefs, next)
     }
 
-    fun updateTargets(next: Set<String>) {
-        targetPackages = next
-        LyricPrefs.setTargetPackages(prefs, next)
+    fun updateTargetsAndOffsets(nextPackages: Set<String>, nextOffsets: Map<String, Int>) {
+        targetPackages = nextPackages
+        appOffsets = nextOffsets
+        LyricPrefs.setTargetPackages(prefs, nextPackages)
+        LyricPrefs.setAppOffsets(prefs, nextOffsets)
     }
 
     if (showAppPicker) {
         TargetAppsDialog(
             selected = targetPackages,
+            offsets = appOffsets,
             onDismiss = { showAppPicker = false },
-            onSave = {
-                updateTargets(it)
+            onSave = { pkgs, offs ->
+                updateTargetsAndOffsets(pkgs, offs)
                 showAppPicker = false
             },
         )
@@ -149,6 +175,7 @@ private fun SetupScreen() {
         SectionLabel("Apps & Fallback")
         TargetAppsCard(
             selectedPackages = targetPackages,
+            appOffsets = appOffsets,
             onOpenPicker = { showAppPicker = true },
         )
         LiveCaptionCard()
@@ -164,7 +191,7 @@ private fun SetupScreen() {
         Step(
             1,
             "Enable in LSPosed",
-            "Open LSPosed → Modules → enable 'Status Bar Lyric', and tick System UI in its scope.",
+            "Open LSPosed -> Modules -> enable 'Status Bar Lyric', and tick System UI in its scope.",
         )
         Step(
             2,
@@ -173,8 +200,8 @@ private fun SetupScreen() {
         )
         Step(
             3,
-            "Play music or video",
-            "Any whitelisted app (Spotify, YouTube, TikTok, etc.). Falls back to LRCLIB and Live Caption when needed.",
+            "Play music or remix",
+            "Any whitelisted app (Spotify, YouTube, TikTok, etc.). Supports per-app delay, Remix title cleaning, LRCLIB, and Live Caption.",
         )
 
         Card(modifier = Modifier.padding(top = 4.dp)) {
@@ -195,30 +222,42 @@ private fun SetupScreen() {
 @Composable
 private fun TargetAppsCard(
     selectedPackages: Set<String>,
+    appOffsets: Map<String, Int>,
     onOpenPicker: () -> Unit,
 ) {
-    Card {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    val customDelayCount = appOffsets.count { it.key in selectedPackages && it.value != 0 }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF181922)),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Text("Target Apps (Whitelist)", style = MaterialTheme.typography.titleSmall)
                     Text(
-                        "${selectedPackages.size} app(s) allowed to display lyrics",
+                        "Target Apps & Delay",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    Text(
+                        "${selectedPackages.size} app đang bật • $customDelayCount app có delay riêng",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                Button(onClick = onOpenPicker) {
-                    Text("Select Apps")
+                Button(
+                    onClick = onOpenPicker,
+                    shape = RoundedCornerShape(12.dp),
+                ) {
+                    Text("Chọn App")
                 }
             }
             if (selectedPackages.isNotEmpty()) {
                 Text(
-                    selectedPackages.sorted().joinToString(", "),
+                    selectedPackages.sorted().joinToString(" • "),
                     style = MaterialTheme.typography.bodySmall,
                     maxLines = 2,
                     overflow = TextOverflow.Ellipsis,
@@ -232,14 +271,23 @@ private fun TargetAppsCard(
 @Composable
 private fun TargetAppsDialog(
     selected: Set<String>,
+    offsets: Map<String, Int>,
     onDismiss: () -> Unit,
-    onSave: (Set<String>) -> Unit,
+    onSave: (Set<String>, Map<String, Int>) -> Unit,
 ) {
     val context = LocalContext.current
     var query by remember { mutableStateOf("") }
+    var onlySelected by remember { mutableStateOf(false) }
     var draft by remember { mutableStateOf(selected) }
+    var draftOffsets by remember { mutableStateOf(offsets) }
     var apps by remember { mutableStateOf<List<AppEntry>>(emptyList()) }
     var loading by remember { mutableStateOf(true) }
+
+    fun adjustOffset(pkg: String, delta: Int) {
+        val cur = draftOffsets[pkg] ?: 0
+        val next = (cur + delta).coerceIn(LyricPrefs.SYNC_OFFSET_MIN, LyricPrefs.SYNC_OFFSET_MAX)
+        draftOffsets = if (next == 0) draftOffsets - pkg else draftOffsets + (pkg to next)
+    }
 
     LaunchedEffect(Unit) {
         apps = withContext(Dispatchers.IO) {
@@ -252,16 +300,16 @@ private fun TargetAppsDialog(
                 if (pkg == context.packageName) continue
                 if (!map.containsKey(pkg)) {
                     val label = runCatching { ri.loadLabel(pm).toString() }.getOrDefault(pkg)
-                    map[pkg] = AppEntry(label = label, packageName = pkg)
+                    val icon = runCatching { drawableToImageBitmap(ri.loadIcon(pm)) }.getOrNull()
+                    map[pkg] = AppEntry(label = label, packageName = pkg, icon = icon)
                 }
             }
             for (pkg in selected) {
                 if (!map.containsKey(pkg)) {
-                    val label = runCatching {
-                        val ai = pm.getApplicationInfo(pkg, 0)
-                        pm.getApplicationLabel(ai).toString()
-                    }.getOrDefault(pkg)
-                    map[pkg] = AppEntry(label = label, packageName = pkg)
+                    val ai = runCatching { pm.getApplicationInfo(pkg, 0) }.getOrNull()
+                    val label = if (ai != null) pm.getApplicationLabel(ai).toString() else pkg
+                    val icon = if (ai != null) drawableToImageBitmap(pm.getApplicationIcon(ai)) else null
+                    map[pkg] = AppEntry(label = label, packageName = pkg, icon = icon)
                 }
             }
             map.values.sortedWith(
@@ -272,90 +320,300 @@ private fun TargetAppsDialog(
         loading = false
     }
 
-    val filtered = remember(apps, query) {
+    val filtered = remember(apps, query, onlySelected, draft) {
         val q = query.trim().lowercase()
-        if (q.isEmpty()) apps
-        else apps.filter { it.label.lowercase().contains(q) || it.packageName.lowercase().contains(q) }
+        apps.filter { app ->
+            val matchTab = !onlySelected || app.packageName in draft
+            val matchQuery = q.isEmpty() ||
+                app.label.lowercase().contains(q) ||
+                app.packageName.lowercase().contains(q)
+            matchTab && matchQuery
+        }
     }
 
-    AlertDialog(
+    Dialog(
         onDismissRequest = onDismiss,
-        title = { Text("Target Apps (${draft.size})") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(horizontal = 12.dp, vertical = 24.dp),
+            shape = RoundedCornerShape(24.dp),
+            color = Color(0xFF10121A),
+            tonalElevation = 6.dp,
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column {
+                        Text(
+                            "Chọn App & Chỉnh Delay",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White,
+                        )
+                        Text(
+                            "Đã chọn ${draft.size} ứng dụng",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.secondary,
+                        )
+                    }
+                    TextButton(onClick = onDismiss) {
+                        Text("Đóng")
+                    }
+                }
+
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
-                    placeholder = { Text("Search app name or package...") },
+                    placeholder = { Text("Tìm tên app (YouTube, Spotify, TikTok...)") },
                     singleLine = true,
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth(),
                 )
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    TextButton(onClick = { draft = LyricPrefs.DEFAULT_PACKAGES }) {
-                        Text("Reset defaults")
-                    }
-                    TextButton(onClick = { draft = emptySet() }) {
-                        Text("Clear all")
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    FilterTab("Tất cả", !onlySelected) { onlySelected = false }
+                    FilterTab("Đã chọn (${draft.size})", onlySelected) { onlySelected = true }
+                    Spacer(Modifier.weight(1f))
+                    TextButton(
+                        onClick = { draft = LyricPrefs.DEFAULT_PACKAGES },
+                        contentPadding = PaddingValues(horizontal = 8.dp),
+                    ) {
+                        Text("Mặc định", fontSize = 12.sp)
                     }
                 }
+
                 if (loading) {
-                    Text("Loading installed apps...", style = MaterialTheme.typography.bodySmall)
+                    Box(
+                        modifier = Modifier
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            "Đang tải danh sách ứng dụng...",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 } else {
                     LazyColumn(
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .heightIn(max = 320.dp),
-                        verticalArrangement = Arrangement.spacedBy(2.dp),
+                            .weight(1f)
+                            .fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         items(filtered, key = { it.packageName }) { app ->
                             val checked = app.packageName in draft
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable {
-                                        draft = if (checked) draft - app.packageName else draft + app.packageName
-                                    }
-                                    .padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically,
-                            ) {
-                                Checkbox(
-                                    checked = checked,
-                                    onCheckedChange = { isChecked ->
-                                        draft = if (isChecked) draft + app.packageName else draft - app.packageName
-                                    },
-                                )
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        app.label,
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                    Text(
-                                        app.packageName,
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                    )
-                                }
-                            }
+                            val appDelay = draftOffsets[app.packageName] ?: 0
+                            AppPickerItem(
+                                app = app,
+                                checked = checked,
+                                delayMs = appDelay,
+                                onToggle = { isChecked ->
+                                    draft = if (isChecked) draft + app.packageName else draft - app.packageName
+                                },
+                                onAdjustDelay = { delta -> adjustOffset(app.packageName, delta) },
+                                onResetDelay = { draftOffsets = draftOffsets - app.packageName },
+                            )
                         }
                     }
                 }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    OutlinedButton(
+                        onClick = onDismiss,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Hủy")
+                    }
+                    Button(
+                        onClick = { onSave(draft, draftOffsets) },
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.weight(1f),
+                    ) {
+                        Text("Lưu thay đổi")
+                    }
+                }
             }
-        },
-        confirmButton = {
-            Button(onClick = { onSave(draft) }) {
-                Text("Save")
+        }
+    }
+}
+
+@Composable
+private fun FilterTab(label: String, active: Boolean, onClick: () -> Unit) {
+    val bg = if (active) Color(0xFF2B3552) else Color(0xFF1A1D29)
+    val border = if (active) Color(0xFF38BDF8) else Color(0xFF2C3040)
+    val textColor = if (active) Color(0xFF38BDF8) else Color(0xFFA0A8C0)
+    Box(
+        modifier = Modifier
+            .clip(RoundedCornerShape(50))
+            .background(bg)
+            .border(1.dp, border, RoundedCornerShape(50))
+            .clickable(onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
+    ) {
+        Text(label, color = textColor, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.SemiBold)
+    }
+}
+
+@Composable
+private fun AppPickerItem(
+    app: AppEntry,
+    checked: Boolean,
+    delayMs: Int,
+    onToggle: (Boolean) -> Unit,
+    onAdjustDelay: (Int) -> Unit,
+    onResetDelay: () -> Unit,
+) {
+    val cardBg = if (checked) Color(0xFF192235) else Color(0xFF151822)
+    val borderColor = if (checked) Color(0xFF38BDF8).copy(alpha = 0.5f) else Color(0xFF232736)
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(cardBg)
+            .border(1.dp, borderColor, RoundedCornerShape(16.dp))
+            .clickable { onToggle(!checked) }
+            .padding(12.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (app.icon != null) {
+                Image(
+                    bitmap = app.icon,
+                    contentDescription = app.label,
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp)),
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .size(40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(Color(0xFF252A3B)),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        app.label.take(1).uppercase(),
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                    )
+                }
             }
-        },
-        dismissButton = {
-            TextButton(onClick = onDismiss) {
-                Text("Cancel")
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    app.label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    color = Color.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    app.packageName,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = Color(0xFF94A3B8),
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
             }
-        },
-    )
+
+            Switch(
+                checked = checked,
+                onCheckedChange = onToggle,
+            )
+        }
+
+        if (checked) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(1.dp)
+                    .background(Color(0xFF27314A)),
+            )
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    val sign = if (delayMs > 0) "+" else ""
+                    Text(
+                        "Delay riêng: $sign$delayMs ms",
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (delayMs != 0) Color(0xFF38BDF8) else Color(0xFFCBD5E1),
+                        fontWeight = FontWeight.SemiBold,
+                    )
+                    if (delayMs != 0) {
+                        Text(
+                            "Reset",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = Color(0xFFF472B6),
+                            modifier = Modifier
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable(onClick = onResetDelay)
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
+                        )
+                    }
+                }
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    DelayStepBtn("-500", Modifier.weight(1f)) { onAdjustDelay(-500) }
+                    DelayStepBtn("-100", Modifier.weight(1f)) { onAdjustDelay(-100) }
+                    DelayStepBtn("+100", Modifier.weight(1f)) { onAdjustDelay(100) }
+                    DelayStepBtn("+500", Modifier.weight(1f)) { onAdjustDelay(500) }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun DelayStepBtn(label: String, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Box(
+        modifier = modifier
+            .clip(RoundedCornerShape(10.dp))
+            .background(Color(0xFF222D45))
+            .border(1.dp, Color(0xFF334155), RoundedCornerShape(10.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 7.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = Color(0xFFE2E8F0),
+            fontWeight = FontWeight.Medium,
+        )
+    }
 }
 
 @Composable
@@ -374,8 +632,11 @@ private fun LiveCaptionCard() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    Card {
-        Column(Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Color(0xFF181922)),
+        shape = RoundedCornerShape(18.dp),
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -398,6 +659,7 @@ private fun LiveCaptionCard() {
                                 .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                         )
                     },
+                    shape = RoundedCornerShape(12.dp),
                 ) {
                     Text(if (enabled) "Settings" else "Enable")
                 }
@@ -444,7 +706,7 @@ private fun StylePreview(style: LyricPrefs.Style) {
     Box(
         modifier = Modifier
             .fillMaxWidth()
-            .background(Color(0xFF202124), RoundedCornerShape(8.dp))
+            .background(Color(0xFF202124), RoundedCornerShape(12.dp))
             .padding(horizontal = 12.dp, vertical = 12.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
@@ -531,7 +793,7 @@ private fun SyncSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) ->
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Text("Sync offset", style = MaterialTheme.typography.titleSmall)
+                Text("Global Sync Offset", style = MaterialTheme.typography.titleSmall)
                 TextButton(
                     onClick = { onChange(style.copy(syncOffsetMs = LyricPrefs.DEF_SYNC_OFFSET)) },
                     enabled = style.syncOffsetMs != LyricPrefs.DEF_SYNC_OFFSET,
@@ -554,6 +816,10 @@ private fun SyncSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) ->
                 ),
                 onValueChange = { onChange(style.copy(syncOffsetMs = (it / 100f).toInt() * 100)) },
                 valueRange = LyricPrefs.SYNC_OFFSET_MIN.toFloat()..LyricPrefs.SYNC_OFFSET_MAX.toFloat(),
+            )
+            Text(
+                "Áp dụng chung cho mọi app (cộng dồn với Delay riêng của từng app).",
+                style = MaterialTheme.typography.bodySmall,
             )
         }
     }
@@ -748,18 +1014,18 @@ private const val AUTHOR_URL = "https://github.com/afrizz19"
 private const val REPO_URL = "https://github.com/afrizz19/io.github.afrizz19.statusbarlyric"
 
 private val AppColors = darkColorScheme(
-    primary = Color(0xFFC4B0FF),
-    onPrimary = Color(0xFF2A1366),
-    primaryContainer = Color(0xFF42308C),
-    onPrimaryContainer = Color(0xFFE7DDFF),
+    primary = Color(0xFF38BDF8),
+    onPrimary = Color(0xFF082F49),
+    primaryContainer = Color(0xFF1E293B),
+    onPrimaryContainer = Color(0xFFE0F2FE),
     secondary = Color(0xFF7FD6C8),
-    background = Color(0xFF111114),
+    background = Color(0xFF0D0F16),
     onBackground = Color(0xFFE6E1E9),
-    surface = Color(0xFF111114),
+    surface = Color(0xFF0D0F16),
     onSurface = Color(0xFFE6E1E9),
-    onSurfaceVariant = Color(0xFFC9C4D0),
-    surfaceContainerHighest = Color(0xFF1E1D24),
-    outlineVariant = Color(0xFF3A3842),
+    onSurfaceVariant = Color(0xFFA0A8C0),
+    surfaceContainerHighest = Color(0xFF181B26),
+    outlineVariant = Color(0xFF2B3144),
 )
 
 @Composable
@@ -769,7 +1035,7 @@ private fun Header() {
         modifier = Modifier
             .fillMaxWidth()
             .background(
-                Brush.linearGradient(listOf(Color(0xFF42308C), Color(0xFF1B5560))),
+                Brush.linearGradient(listOf(Color(0xFF1E293B), Color(0xFF0F3D4C))),
                 RoundedCornerShape(24.dp),
             )
             .padding(20.dp),
@@ -782,7 +1048,7 @@ private fun Header() {
                 color = Color.White,
             )
             Text(
-                "Synced lyrics in your status bar. Runs inside SystemUI without touching Dynamic Island.",
+                "Synced lyrics in your status bar. Supports Remix, per-app delay, and keeps Dynamic Island intact.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = Color.White.copy(alpha = 0.85f),
             )
@@ -816,7 +1082,7 @@ private fun Pill(text: String, onClick: (() -> Unit)? = null) {
 @Composable
 private fun InactiveWarning() {
     Card(
-        colors = androidx.compose.material3.CardDefaults.cardColors(
+        colors = CardDefaults.cardColors(
             containerColor = MaterialTheme.colorScheme.errorContainer,
             contentColor = MaterialTheme.colorScheme.onErrorContainer,
         ),

@@ -100,7 +100,8 @@ object LyricController {
 
         val currentEngine = engine
         if (currentEngine != null) {
-            val pos = track.estimatedPositionMs(now) + style.syncOffsetMs
+            val appOffset = HookPrefs.appOffset(SystemClock.uptimeMillis(), track.packageName)
+            val pos = track.estimatedPositionMs(now) + style.syncOffsetMs + appOffset
             val active = currentEngine.activeLineAt(pos)
             val text = active?.text?.takeIf { it.isNotBlank() }
             render(text)
@@ -108,7 +109,6 @@ object LyricController {
             return
         }
 
-        // Fallback to Live Caption after 2.5s when neither Lrcmux nor LRCLIB has lyrics
         if (lyricsMissingForTrack && now - trackStartedElapsedMs >= LIVE_CAPTION_DELAY_MS) {
             val caption = HookPrefs.recentLiveCaption(
                 nowRealtimeMs = System.currentTimeMillis(),

@@ -5,11 +5,8 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import kotlin.math.abs
 
-/**
- * Fetches synced lyrics from lrcmux first, then automatically falls back to LRCLIB
- * after cleaning noisy YouTube / TikTok / social media titles via Regex.
- */
 class LyricsRepository(
     private val client: LrcMuxApiClient = LrcMuxApiClient(),
 ) {
@@ -20,12 +17,13 @@ class LyricsRepository(
         album: String = "",
         durationMs: Long = 0L,
     ): LyricsResult? {
-        val (cleanArtist, cleanTitle) = normalizeMetadata(artist, title)
+        val (cleanArtist, cleanTitle, isRemix) = normalizeMetadata(artist, title)
 
-        // 1. Primary: Lrcmux (supports word-level karaoke + line-level)
         val primary = runCatching {
-            client.fetchLyrics(cleanArtist, cleanTitle, album, durationMs)
-        }.getOrNull() ?: if (cleanArtist != artist || cleanTitle != title) {
+            client.fetchLyrics(cleanArtist, cleanTitle, album, if (isRemix) 0L else durationMs)
+        }.getOrNull() ?: if (cleanArtist.isNotBlank() && isRemix) {
+            runCatching { client.fetchLyrics("", cleanTitle, "", 0L) }.getOrNull()
+        } else if (cleanArtist != artist || cleanTitle != title) {
             runCatching { client.fetchLyrics(artist, title, album, durationMs) }.getOrNull()
         } else {
             null
@@ -36,30 +34,37 @@ class LyricsRepository(
             return if (stripped.size == primary.lines.size) primary else primary.copy(lines = stripped)
         }
 
-        // 2. Fallback: LRCLIB (line-level LRC)
-        val fallback = fetchFromLrcLib(cleanArtist, cleanTitle, album, durationMs) ?: return null
+        val fallback = fetchFromLrcLib(cleanArtist, cleanTitle, album, durationMs, isRemix) ?: return null
         if (fallback.lines.isEmpty()) return null
 
         val stripped = TranslationFilter.strip(fallback.lines)
         return if (stripped.size == fallback.lines.size) fallback else fallback.copy(lines = stripped)
     }
 
-    private fun normalizeMetadata(rawArtist: String, rawTitle: String): Pair<String, String> {
+    private data class NormalizedTrack(
+        val artist: String,
+        val title: String,
+        val isRemix: Boolean,
+    )
+
+    private fun normalizeMetadata(rawArtist: String, rawTitle: String): NormalizedTrack {
+        val remixRegex = Regex(
+            """(?i)\b(remix|vinahouse|nonstop|mashup|speed\s*up|slowed|reverb|lofi|lo-fi|dj|mix|cover|edit|beat|karaoke|instrumental|tiktok|tik\s*tok)\b"""
+        )
+        val isRemix = remixRegex.containsMatchIn(rawTitle) || remixRegex.containsMatchIn(rawArtist)
+
         var title = rawTitle
-            // Cut trailing channel/hashtag suffixes after | or //
-            .replace(Regex("""\s*(||//)\s*.*$"""), "")
-            // Remove bracketed / parenthesized tags like (Official MV), [Lyrics], (Remix), etc.
+            .replace(Regex("""\s*(\||//)\s*.*$"""), "")
             .replace(
                 Regex(
-                    """[\(\[\{【「].*?(official|music\s*video|mv|lyric|lyrics|audio|video|hd|4k|8k|hq|visualizer|live|cover|remix|speed\s*up|slowed|reverb|ver\.?|version|full|teaser|trailer|shorts|tiktok|prod\.|ft\.|feat\.).*?[\)\]\}】」]""",
+                    """[\(\[\{【「].*?(official|music\s*video|mv|lyric|lyrics|audio|video|hd|4k|8k|hq|visualizer|live|cover|remix|vinahouse|nonstop|mashup|lofi|lo-fi|dj|mix|speed\s*up|slowed|reverb|ver\.?|version|full|teaser|trailer|shorts|tiktok|tik\s*tok|prod\.|ft\.|feat\.|edit).*?[\)\]\}】」]""",
                     RegexOption.IGNORE_CASE,
                 ),
                 "",
             )
-            // Remove standalone noisy keywords and hashtags
             .replace(
                 Regex(
-                    """(?i)\b(official\s*(music\s*)?video|official\s*mv|official\s*audio|lyric(s)?\s*video|full\s*mv|audio\s*only|4k\s*remaster|hd)\b|#\S+""",
+                    """(?i)\b(official\s*(music\s*)?video|official\s*mv|official\s*audio|lyric(s)?\s*video|full\s*mv|audio\s*only|4k\s*remaster|hot\s*tik\s*tok|nhạc\s*trẻ|hd)\b|#\S+""",
                 ),
                 "",
             )
@@ -70,20 +75,41 @@ class LyricsRepository(
 
         var artist = rawArtist
             .replace(Regex("""(?i)\s*-\s*Topic$"""), "")
-            .replace(Regex("""(?i)\b(official|vevo|channel)\b"""), "")
+            .replace(Regex("""(?i)\b(official|vevo|channel|music|remix|dj|tv|media|entertainment)\b"""), "")
             .replace(Regex("""\s{2,}"""), " ")
             .trim()
 
-        // Extract "Artist - Title" when artist metadata is empty or matches generic app/uploader
-        if (artist.isBlank() || title.contains(" - ")) {
-            val parts = title.split(Regex("""\s+[-–—]\s+"""), limit = 2)
-            if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
-                if (artist.isBlank()) artist = parts[0].trim()
-                title = parts[1].trim()
+        val parts = title.split(Regex("""\s+[-–—]\s+"""), limit = 2)
+        if (parts.size == 2 && parts[0].isNotBlank() && parts[1].isNotBlank()) {
+            val left = parts[0].trim()
+            val right = parts[1].trim()
+            if (remixRegex.containsMatchIn(right)) {
+                title = left
+            } else if (remixRegex.containsMatchIn(left)) {
+                title = right
+            } else if (artist.isBlank()) {
+                artist = left
+                title = right
+            } else {
+                title = right
             }
         }
 
-        return artist to title.ifBlank { rawTitle.trim() }
+        title = title
+            .replace(
+                Regex("""(?i)\b(remix|vinahouse|nonstop|mashup|speed\s*up|slowed|reverb|lofi|lo-fi|cover|edit|ver\.?\s*\d*|version)\b"""),
+                "",
+            )
+            .replace(Regex("""\s{2,}"""), " ")
+            .trim()
+            .trim('-', '–', '—', ':')
+            .trim()
+
+        return NormalizedTrack(
+            artist = if (isRemix) "" else artist,
+            title = title.ifBlank { rawTitle.trim() },
+            isRemix = isRemix,
+        )
     }
 
     private fun fetchFromLrcLib(
@@ -91,11 +117,11 @@ class LyricsRepository(
         title: String,
         album: String,
         durationMs: Long,
+        isRemix: Boolean,
     ): LyricsResult? {
         if (title.isBlank()) return null
 
-        // Try exact /api/get first when artist is available
-        if (artist.isNotBlank()) {
+        if (artist.isNotBlank() && !isRemix) {
             val params = buildList {
                 add("artist_name=${encode(artist)}")
                 add("track_name=${encode(title)}")
@@ -109,9 +135,15 @@ class LyricsRepository(
             }
         }
 
-        // Fall back to /api/search?q=...
-        val query = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
-        val searchJson = httpGet("https://lrclib.net/api/search?q=${encode(query)}") ?: return null
+        if (artist.isNotBlank()) {
+            searchLrcLib("$artist $title", if (isRemix) 0L else durationMs)?.let { return it }
+        }
+
+        return searchLrcLib(title, if (isRemix) 0L else durationMs)
+    }
+
+    private fun searchLrcLib(query: String, durationMs: Long): LyricsResult? {
+        val searchJson = httpGet("https://lrclib.net/api/search?q=${encode(query.trim())}") ?: return null
         val arr = runCatching { JSONArray(searchJson) }.getOrNull() ?: return null
         val targetSec = if (durationMs > 0L) durationMs / 1000.0 else -1.0
         var bestResult: LyricsResult? = null
@@ -121,7 +153,7 @@ class LyricsRepository(
             val parsed = parseLrcLibObject(obj) ?: continue
             if (targetSec <= 0.0) return parsed
             val dur = obj.optDouble("duration", -1.0)
-            val diff = if (dur > 0.0) kotlin.math.abs(dur - targetSec) else 9999.0
+            val diff = if (dur > 0.0) abs(dur - targetSec) else 9999.0
             if (diff < bestDiff) {
                 bestDiff = diff
                 bestResult = parsed

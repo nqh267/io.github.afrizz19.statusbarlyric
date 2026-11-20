@@ -51,7 +51,12 @@ object HookPrefs {
             .toSet()
     }
 
-    /** Returns fresh Live Caption text if updated within the last 5 seconds, else null. */
+    fun appOffset(nowMs: Long, packageName: String): Int {
+        val p = current(nowMs) ?: return 0
+        val raw = p.getString(LyricPrefs.KEY_APP_OFFSETS, "").orEmpty()
+        return LyricPrefs.parseAppOffsets(raw)[packageName] ?: 0
+    }
+
     fun recentLiveCaption(nowRealtimeMs: Long, uptimeMs: Long): String? {
         val p = current(uptimeMs) ?: return null
         val ts = p.getLong(LyricPrefs.KEY_LIVE_CAPTION_TS, 0L)

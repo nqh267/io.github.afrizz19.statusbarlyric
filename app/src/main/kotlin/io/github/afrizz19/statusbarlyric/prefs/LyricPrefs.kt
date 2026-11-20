@@ -24,11 +24,10 @@ object LyricPrefs {
     const val KEY_WORD_DIM_ALPHA = "word_dim_alpha"
     const val KEY_WORD_SMOOTH = "word_smooth"
 
-    /** Comma-separated package whitelist (String is rock-solid across XSharedPreferences). */
     const val KEY_TARGET_PACKAGES = "target_packages_csv"
     const val KEY_TARGET_CUSTOMIZED = "target_packages_customized"
+    const val KEY_APP_OFFSETS = "app_offsets_csv"
 
-    /** Live Caption fallback text bridged via shared prefs for SystemUI hook. */
     const val KEY_LIVE_CAPTION_TEXT = "live_caption_text"
     const val KEY_LIVE_CAPTION_TS = "live_caption_ts"
 
@@ -46,8 +45,8 @@ object LyricPrefs {
     const val DEF_SYNC_OFFSET = 0
     const val DEF_WORD_DIM_ALPHA = 0.45f
 
-    const val SYNC_OFFSET_MIN = -10000
-    const val SYNC_OFFSET_MAX = 10000
+    const val SYNC_OFFSET_MIN = -15000
+    const val SYNC_OFFSET_MAX = 15000
 
     val DEFAULT_PACKAGES = setOf(
         "com.spotify.music",
@@ -107,6 +106,32 @@ object LyricPrefs {
             .putBoolean(KEY_TARGET_CUSTOMIZED, true)
             .putString(KEY_TARGET_PACKAGES, packages.sorted().joinToString(","))
             .apply()
+    }
+
+    fun parseAppOffsets(raw: String?): Map<String, Int> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        val out = linkedMapOf<String, Int>()
+        for (entry in raw.split(',')) {
+            val idx = entry.indexOf('=')
+            if (idx <= 0) continue
+            val pkg = entry.substring(0, idx).trim()
+            val value = entry.substring(idx + 1).trim().toIntOrNull() ?: continue
+            if (pkg.isNotEmpty() && value != 0) {
+                out[pkg] = value.coerceIn(SYNC_OFFSET_MIN, SYNC_OFFSET_MAX)
+            }
+        }
+        return out
+    }
+
+    fun appOffsets(prefs: SharedPreferences): Map<String, Int> =
+        parseAppOffsets(prefs.getString(KEY_APP_OFFSETS, ""))
+
+    fun setAppOffsets(prefs: SharedPreferences, offsets: Map<String, Int>) {
+        val serialized = offsets.entries
+            .filter { it.key.isNotBlank() && it.value != 0 }
+            .sortedBy { it.key }
+            .joinToString(",") { (k, v) -> "$k=${v.coerceIn(SYNC_OFFSET_MIN, SYNC_OFFSET_MAX)}" }
+        prefs.edit().putString(KEY_APP_OFFSETS, serialized).apply()
     }
 
     fun updateLiveCaption(prefs: SharedPreferences, text: String, timestampMs: Long) {
