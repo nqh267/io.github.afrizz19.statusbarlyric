@@ -113,11 +113,21 @@ class LyricsRepository(
         val query = listOf(artist, title).filter { it.isNotBlank() }.joinToString(" ")
         val searchJson = httpGet("https://lrclib.net/api/search?q=${encode(query)}") ?: return null
         val arr = runCatching { JSONArray(searchJson) }.getOrNull() ?: return null
+        val targetSec = if (durationMs > 0L) durationMs / 1000.0 else -1.0
+        var bestResult: LyricsResult? = null
+        var bestDiff = Double.MAX_VALUE
         for (i in 0 until arr.length()) {
             val obj = arr.optJSONObject(i) ?: continue
-            parseLrcLibObject(obj)?.let { return it }
+            val parsed = parseLrcLibObject(obj) ?: continue
+            if (targetSec <= 0.0) return parsed
+            val dur = obj.optDouble("duration", -1.0)
+            val diff = if (dur > 0.0) kotlin.math.abs(dur - targetSec) else 9999.0
+            if (diff < bestDiff) {
+                bestDiff = diff
+                bestResult = parsed
+            }
         }
-        return null
+        return bestResult
     }
 
     private fun parseLrcLibObject(obj: JSONObject): LyricsResult? {

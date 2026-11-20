@@ -46,8 +46,8 @@ object LyricPrefs {
     const val DEF_SYNC_OFFSET = 0
     const val DEF_WORD_DIM_ALPHA = 0.45f
 
-    const val SYNC_OFFSET_MIN = -1500
-    const val SYNC_OFFSET_MAX = 1500
+    const val SYNC_OFFSET_MIN = -10000
+    const val SYNC_OFFSET_MAX = 10000
 
     val DEFAULT_PACKAGES = setOf(
         "com.spotify.music",

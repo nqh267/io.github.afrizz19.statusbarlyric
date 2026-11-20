@@ -548,10 +548,12 @@ private fun SyncSetting(style: LyricPrefs.Style, onChange: (LyricPrefs.Style) ->
                 style = MaterialTheme.typography.bodySmall,
             )
             Slider(
-                value = style.syncOffsetMs.toFloat(),
-                onValueChange = { onChange(style.copy(syncOffsetMs = (it / 50f).toInt() * 50)) },
+                value = style.syncOffsetMs.toFloat().coerceIn(
+                    LyricPrefs.SYNC_OFFSET_MIN.toFloat(),
+                    LyricPrefs.SYNC_OFFSET_MAX.toFloat(),
+                ),
+                onValueChange = { onChange(style.copy(syncOffsetMs = (it / 100f).toInt() * 100)) },
                 valueRange = LyricPrefs.SYNC_OFFSET_MIN.toFloat()..LyricPrefs.SYNC_OFFSET_MAX.toFloat(),
-                steps = 59,
             )
         }
     }
