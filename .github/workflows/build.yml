@@ -32,17 +32,30 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x ./gradlew
 
-      - name: Decode signing keystore (if configured in repository secrets)
-        if: ${{ secrets.SIGNING_KEYSTORE_BASE64 != '' }}
+      - name: Configure signing keystore
         env:
           KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
           KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
         run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release-keystore.jks"
+          KEYSTORE_PATH="$RUNNER_TEMP/release-keystore.jks"
+          if [ -n "$KEYSTORE_BASE64" ]; then
+            echo "$KEYSTORE_BASE64" | base64 --decode > "$KEYSTORE_PATH"
+          else
+            STORE_PASSWORD="android_release_pass"
+            KEY_ALIAS="statusbarlyric_key"
+            KEY_PASSWORD="android_release_pass"
+            keytool -genkeypair -v \
+              -keystore "$KEYSTORE_PATH" \
+              -alias "$KEY_ALIAS" \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -storepass "$STORE_PASSWORD" \
+              -keypass "$KEY_PASSWORD" \
+              -dname "CN=StatusBarLyric, OU=Mod, O=Android, L=Unknown, ST=Unknown, C=US"
+          fi
           {
-            echo "androidStoreFile=$RUNNER_TEMP/release-keystore.jks"
+            echo "androidStoreFile=$KEYSTORE_PATH"
             echo "androidStorePassword=$STORE_PASSWORD"
             echo "androidKeyAlias=$KEY_ALIAS"
             echo "androidKeyPassword=$KEY_PASSWORD"
@@ -67,12 +80,3 @@ jobs:
           name: StatusBarLyric16-release
           path: app/build/outputs/apk/release/*.apk
           if-no-files-found: error
-
-      - name: Publish GitHub Release on version tags
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            app/build/outputs/apk/release/*.apk
-            app/build/outputs/apk/debug/*.apk
-          generate_release_notes: true
